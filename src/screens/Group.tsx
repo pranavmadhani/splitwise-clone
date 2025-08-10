@@ -1,86 +1,84 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { View, ScrollView } from 'react-native';
-import { Title, Subtitle, Card, ListRow, Avatar, Progress, Tag, Button, SectionHeader, Money } from '../ui';
-import { theme } from '../theme';
-import * as data from '../services/data';
+import React, { useState } from 'react';
+import { FlatList, View } from 'react-native';
+import Header from '../components/Header';
+import {
+  Amount, Avatar, Body, Card, Dim, H2, Label, Pill, Progress, Row, Screen, Segmented,
+} from '../ui';
+import { getGroup, listExpensesByGroup } from '../services/data';
+import { spacing } from '../theme';
+
+const TABS = ['Expenses', 'Balances', 'Members'] as const;
 
 export default function Group({ route }: any) {
-  const id = route?.params?.id ?? 'g1';
+  const id = route?.params?.id || 'g1';
+  const group = getGroup(id)!;
+  const [tab, setTab] = useState<string>(TABS[0]);
 
-  const [group, setGroup] = useState<any>();
-  const [expenses, setExpenses] = useState<any[]>([]);
-  const [summary, setSummary] = useState<{ totalIn: number; totalOut: number }>({ totalIn: 0, totalOut: 0 });
-
-  useEffect(() => {
-    setGroup(data.getGroup(id));
-    setExpenses(data.listExpensesByGroup(id));
-    setSummary(data.getGroupSummary(id));
-  }, [id]);
-
-  const months = useMemo(() => {
-    const fmt = (ts: number) =>
-      new Date(ts).toLocaleString('en', { month: 'long', year: 'numeric' });
-    const m: Record<string, any[]> = {};
-    expenses.forEach((e) => {
-      const k = fmt(e.createdAt);
-      (m[k] ||= []).push(e);
-    });
-    return Object.entries(m);
-  }, [expenses]);
-
-  const totalBar = (summary.totalIn + summary.totalOut) || 1;
-  const pct = summary.totalIn / totalBar;
+  const ex = listExpensesByGroup(id);
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: theme.colors.bg }} contentContainerStyle={{ padding: 16, paddingBottom: 96 }}>
-      <Title>{group?.name || 'Group'}</Title>
-      <View style={{ height: 12 }} />
+    <Screen>
+      <Header title="Group" />
 
+      {/* Header stat card */}
       <Card>
-        <Subtitle>Total Owed</Subtitle>
-        <View style={{ height: 4 }} />
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-          <Money value={+summary.totalIn} bold />
-          <Money value={-summary.totalOut} bold />
-        </View>
-        <View style={{ height: 10 }} />
-        <Progress value={pct} />
-        <View style={{ height: 12 }} />
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <Button title="Settle Up" />
-          <Button title="View Details" kind="ghost" />
-          <Button title="Balance" kind="ghost" />
-        </View>
+        <Row style={{ justifyContent: 'space-between', marginBottom: spacing[3] }}>
+          <Row style={{ gap: spacing[3] }}>
+            <Avatar uri={group.cover} size={44} label={group.name[0]} />
+            <View>
+              <H2>{group.name}</H2>
+              <Dim>Total receivable</Dim>
+            </View>
+          </Row>
+          <Amount amt={group.delta} />
+        </Row>
+        <Progress value={65} />
+        <Row style={{ gap: spacing[3], marginTop: spacing[4] }}>
+          <Pill active>Expense view</Pill>
+          <Pill>Friends view</Pill>
+        </Row>
       </Card>
 
-      <View style={{ height: 12 }} />
-      <Card>
-        <Subtitle>Group expenses</Subtitle>
-        {months.map(([label, arr]) => (
-          <View key={label}>
-            <SectionHeader label={label} />
-            {arr.map((e) => (
-              <ListRow
-                key={e.id}
-                left={<Avatar name={e.paidByName || 'You'} />}
-                title={e.description}
-                caption={`${new Date(e.createdAt).toLocaleDateString()} • Paid by ${e.paidByName || 'You'}`}
-                right={
-                  <View style={{ alignItems: 'flex-end' }}>
-                    <Tag
-                      tone={e.youLent ? 'lent' : e.youBorrowed ? 'borrowed' : 'settled'}
-                      label={e.youLent ? 'Lent' : e.youBorrowed ? 'Borrowed' : 'Settled'}
-                    />
-                    <View style={{ height: 6 }} />
-                    <Money value={e.amount * (e.youLent ? 1 : -1)} />
+      {/* Segments like the design */}
+      <Segmented style={{ marginTop: spacing[4] }} value={tab} options={[...TABS]} onChange={setTab} />
+
+      {/* Expenses list */}
+      {tab === 'Expenses' && (
+        <Card style={{ marginTop: spacing[4] }}>
+          <Label>Recent expenses</Label>
+          <FlatList
+            data={ex}
+            keyExtractor={(i) => i.id}
+            ItemSeparatorComponent={() => <View style={{ height: spacing[3] }} />}
+            renderItem={({ item }) => (
+              <Row style={{ justifyContent: 'space-between' }}>
+                <Row style={{ gap: spacing[3] }}>
+                  <Avatar size={36} label={item.paidByName?.slice(0, 1)} />
+                  <View>
+                    <Body>{item.description}</Body>
+                    <Dim>Paid by {item.paidByName}</Dim>
                   </View>
-                }
-              />
-            ))}
-          </View>
-        ))}
-        {expenses.length === 0 && <Subtitle>No expenses yet.</Subtitle>}
-      </Card>
-    </ScrollView>
+                </Row>
+                <Amount amt={item.amount * (item.youLent ? 1 : -1)} />
+              </Row>
+            )}
+          />
+        </Card>
+      )}
+
+      {tab === 'Balances' && (
+        <Card style={{ marginTop: spacing[4] }}>
+          <Label>Balances</Label>
+          <Dim style={{ marginTop: 8 }}>Mock balances for now.</Dim>
+        </Card>
+      )}
+
+      {tab === 'Members' && (
+        <Card style={{ marginTop: spacing[4] }}>
+          <Label>Members</Label>
+          <Dim style={{ marginTop: 8 }}>Members list placeholder.</Dim>
+        </Card>
+      )}
+    </Screen>
   );
 }

@@ -1,58 +1,52 @@
-import React, { useEffect, useState } from 'react';
-import { ScrollView, View, Image } from 'react-native';
-import { Title, Subtitle, Card, ListRow, Progress, Money, Button } from '../ui';
-import { theme } from '../theme';
-import * as data from '../services/data';
+import React from 'react';
+import { FlatList, View } from 'react-native';
+import Header from '../components/Header';
+import { Amount, Body, Card, Dim, H2, Label, PrimaryBtn, Progress, Row, Screen } from '../ui';
+import { getDashboardSummary, groups } from '../services/data';
+import { palette, radius, spacing } from '../theme';
 
 export default function Home() {
-  const [summary, setSummary] = useState({ in: 0, out: 0 });
-  const [groups, setGroups] = useState<any[]>([]);
-
-  useEffect(() => {
-    setSummary(data.getDashboardSummary());
-    setGroups(data.listGroups());
-  }, []);
-
-  const pct = summary.in / ((summary.in + summary.out) || 1);
+  const summary = getDashboardSummary();
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: theme.colors.bg }} contentContainerStyle={{ padding: 16 }}>
-      <Title>Dashboard</Title>
-      <View style={{ height: 12 }} />
+    <Screen>
+      <Header title="Dashboard" />
+
+      {/* Summary card */}
       <Card>
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+        <Row style={{ justifyContent: 'space-between', marginBottom: spacing[3] }}>
           <View>
-            <Subtitle>Total Owed</Subtitle>
-            <Money value={+summary.in} bold />
+            <Label>Total Owed</Label>
+            <Amount amt={+summary.in.toFixed(2)} />
           </View>
-          <View style={{ alignItems: 'flex-end' }}>
-            <Subtitle>Total Owe</Subtitle>
-            <Money value={-summary.out} bold />
+          <View>
+            <Label>Total Owe</Label>
+            <Amount amt={-summary.out} />
           </View>
-        </View>
-        <View style={{ height: 10 }} />
-        <Progress value={pct} />
-        <View style={{ height: 12 }} />
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <Button title="Settle Up" />
-          <Button title="View Details" kind="ghost" />
-          <Button title="Balance" kind="ghost" />
-        </View>
+        </Row>
+        <Progress value={60} />
+        <Row style={{ gap: spacing[3], marginTop: spacing[4] }}>
+          <PrimaryBtn title="Settle Up" />
+          <PrimaryBtn title="View Details" style={{ backgroundColor: palette.cardElev }} />
+        </Row>
       </Card>
 
-      <View style={{ height: 12 }} />
-      <Subtitle>Groups</Subtitle>
-      <Card>
-        {groups.map((g) => (
-          <ListRow
-            key={g.id}
-            left={<Image source={{ uri: g.cover }} style={{ width: 42, height: 42, borderRadius: 10 }} />}
-            title={g.name}
-            caption={g.status}
-            right={<Money value={g.delta} />}
-          />
-        ))}
-      </Card>
-    </ScrollView>
+      {/* Groups list */}
+      <H2 style={{ marginTop: spacing[5], marginBottom: spacing[3] }}>Groups</H2>
+      <FlatList
+        data={groups}
+        keyExtractor={(g) => g.id}
+        ItemSeparatorComponent={() => <View style={{ height: spacing[3] }} />}
+        renderItem={({ item }) => (
+          <Card>
+            <Row style={{ justifyContent: 'space-between' }}>
+              <Body>{item.name}</Body>
+              <Amount amt={item.delta} />
+            </Row>
+            <Dim style={{ marginTop: 4 }}>{item.status}</Dim>
+          </Card>
+        )}
+      />
+    </Screen>
   );
 }

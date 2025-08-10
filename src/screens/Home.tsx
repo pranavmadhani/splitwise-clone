@@ -2,7 +2,7 @@
 import React from 'react';
 import { View, Text, FlatList, Image, TouchableOpacity, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons, Feather } from '@expo/vector-icons';
+import Icon from '../components/icon'; // ← use the wrapper
 
 const mint = '#18C29C';
 const orange = '#F47A2A';
@@ -68,10 +68,12 @@ export default function Home() {
         <Text style={styles.title}>Dashboard</Text>
         <View style={styles.actions}>
           <View style={styles.bubble}>
-            <Feather name="search" size={18} color={text} />
+            {/* Feather: search */}
+            <Icon type="feather" name="search" size={18} color={text} />
           </View>
           <View style={[styles.bubble, { marginLeft: 12 }]}>
-            <Ionicons name="notifications-outline" size={19} color={text} />
+            {/* Ionicons: bell/notifications */}
+            <Icon type="ion" name="notifications-outline" size={19} color={text} />
           </View>
         </View>
       </View>

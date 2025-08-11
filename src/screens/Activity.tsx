@@ -1,404 +1,396 @@
-// src/screens/Activity.tsx
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
-  FlatList,
   StyleSheet,
-  Image,
-  StatusBar,
-  SafeAreaView,
+  SectionList,
+  RefreshControl,
   TouchableOpacity,
 } from 'react-native';
+import { Title, Card, Input, Button } from '../ui';
+import { theme } from '../theme';
+import Icon from '../components/Icon';
+import { offlineGroups } from '../services/offline';
+import { all, run } from '../local/db'; // read payments/expenses directly
 
-// ------------------------------------------------------------------
-// Dummy data – mirrors the Behance layout (Today/Yesterday sections)
-// ------------------------------------------------------------------
-type ActivityStatus = 'Owe' | 'Owed' | 'Settled';
-type ActivityItem = {
+type FeedItem = {
   id: string;
-  dateISO: string; // e.g. "2024-05-06"
-  time: string;    // e.g. "6:48pm"
-  title: string;
-  subtitle: string; // "You Added", "Sumit Added", etc.
-  status: ActivityStatus;
-  amount: number; // positive number; we’ll add +/− via status
-  iconBg: string; // pastel circle bg for left icon
-  accent: string; // thin line color inside card
-  avatars: string[]; // right-bottom stack
+  kind: 'expense' | 'payment';
+  groupId: string;
+  title: string;     // expense description OR “Payment”
+  subtitle: string;  // who paid / who paid whom
+  amount: number;    // >0 = credit to you, <0 = you paid
+  createdAt: string;
+  actors?: { fromId?: string; toId?: string; paidById?: string };
 };
 
-// two day buckets to match the reference
-const TODAY = '2024-05-06';
-const YDAY  = '2024-05-05';
+type Section = { title: string; data: FeedItem[] };
 
-const DATA: ActivityItem[] = [
-  {
-    id: '1',
-    dateISO: TODAY,
-    time: '6:48pm',
-    title: 'PDC printout',
-    subtitle: 'You Added',
-    status: 'Owe',
-    amount: 30.0,
-    iconBg: '#BDEAD6',
-    accent: '#47B491',
-    avatars: [
-      'https://i.pravatar.cc/48?img=1',
-      'https://i.pravatar.cc/48?img=2',
-      'https://i.pravatar.cc/48?img=3',
-    ],
-  },
-  {
-    id: '2',
-    dateISO: TODAY,
-    time: '4:48pm',
-    title: "Haldiram’s Snacks",
-    subtitle: 'Sumit Added',
-    status: 'Owed',
-    amount: 26.32,
-    iconBg: '#F6C6A7',
-    accent: '#E77F2F',
-    avatars: [
-      'https://i.pravatar.cc/48?img=4',
-      'https://i.pravatar.cc/48?img=5',
-      'https://i.pravatar.cc/48?img=6',
-    ],
-  },
-  {
-    id: '3',
-    dateISO: TODAY,
-    time: '12:48pm',
-    title: 'Train Tickets',
-    subtitle: 'Yash Raj Added',
-    status: 'Settled',
-    amount: 1254.84,
-    iconBg: '#C9E9E5',
-    accent: '#7ED8C9',
-    avatars: [
-      'https://i.pravatar.cc/48?img=7',
-      'https://i.pravatar.cc/48?img=8',
-      'https://i.pravatar.cc/48?img=9',
-    ],
-  },
-  {
-    id: '4',
-    dateISO: YDAY,
-    time: '6:48pm',
-    title: 'Hotel Trip',
-    subtitle: 'You Added',
-    status: 'Owe',
-    amount: 854.0,
-    iconBg: '#BDEAD6',
-    accent: '#47B491',
-    avatars: [
-      'https://i.pravatar.cc/48?img=4',
-      'https://i.pravatar.cc/48?img=2',
-      'https://i.pravatar.cc/48?img=5',
-    ],
-  },
-];
-
-// ------------------------------------------------------------------
-// Small UI atoms local to this file (no external UI libs)
-// ------------------------------------------------------------------
-const palette = {
-  screenBg: '#0F1316',
-  card: '#2C3338',
-  cardSoft: '#3A4248',
-  text: '#E9ECEF',
-  textDim: '#B7C0C8',
-  divider: '#2A2F34',
-  pillDot: '#1EE0A1',
-  oweBg: '#0E6A52',
-  owedBg: '#7A3A17',
-  settledBg: '#2C6E63',
-  oweText: '#D7FFF3',
-  owedText: '#FFE9D9',
-  settledText: '#DFF6F2',
-  moneyPos: '#62D39E',
-  moneyNeg: '#FF7C74',
+const COLORS = {
+  credit: '#27ae60',
+  debit: '#e54f4f',
+  txt: theme.colors.text,
+  sub: theme.colors.subtext,
+  line: theme.colors.line,
+  chip: '#F1F5F9',
 };
 
-function StatusPill({ status }: { status: ActivityStatus }) {
-  const cfg = useMemo(() => {
-    switch (status) {
-      case 'Owe':
-        return { bg: palette.oweBg, fg: palette.oweText, label: '• Owe' };
-      case 'Owed':
-        return { bg: palette.owedBg, fg: palette.owedText, label: '• Owed' };
-      case 'Settled':
-        return { bg: palette.settledBg, fg: palette.settledText, label: '• Settled' };
-    }
-  }, [status]);
+/** Utility: date label buckets */
+function dateBucket(dateISO: string) {
+  const d = new Date(dateISO);
+  const now = new Date();
 
-  return (
-    <View style={[styles.pill, { backgroundColor: cfg.bg }]}>
-      <Text style={[styles.pillText, { color: cfg.fg }]}>{cfg.label}</Text>
-    </View>
-  );
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const oneDay = 24 * 60 * 60 * 1000;
+  const diffDays = (startOfDay(now).getTime() - startOfDay(d).getTime()) / oneDay;
+
+  if (diffDays <= 0) return 'Today';
+  if (diffDays <= 1) return 'Yesterday';
+
+  // This Week / This Month
+  const sameWeek = (a: Date, b: Date) => {
+    const ad = new Date(a); ad.setHours(0,0,0,0);
+    const bd = new Date(b); bd.setHours(0,0,0,0);
+    const aDay = (ad.getDay() + 6) % 7; // make Monday=0
+    const bDay = (bd.getDay() + 6) % 7;
+    const aMon = new Date(ad); aMon.setDate(ad.getDate() - aDay);
+    const bMon = new Date(bd); bMon.setDate(bd.getDate() - bDay);
+    return aMon.getFullYear() === bMon.getFullYear() && aMon.getMonth() === bMon.getMonth() && aMon.getDate() === bMon.getDate();
+  };
+  if (sameWeek(d, now)) return 'This week';
+
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) return 'This month';
+
+  return d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
 }
 
-function Money({ status, amt, big }: { status: ActivityStatus; amt: number; big?: boolean }) {
-  const sign = status === 'Owed' ? '-' : status === 'Owe' ? '' : '';
-  const color =
-    status === 'Owed' ? palette.moneyNeg : status === 'Settled' ? palette.moneyPos : palette.moneyPos;
-  return (
-    <Text style={[styles.money, big && styles.moneyBig, { color }]}>{`${sign}$${amt.toLocaleString(
-      undefined,
-      { minimumFractionDigits: 2, maximumFractionDigits: 2 }
-    )}`}</Text>
-  );
-}
+export default function Activity({ navigation }: any) {
+  const [groups, setGroups] = useState<{ id: string; name: string }[]>([]);
+  const [groupId, setGroupId] = useState<string | 'all'>('all');
+  const [type, setType] = useState<'all' | 'expenses' | 'payments'>('all');
+  const [query, setQuery] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [feed, setFeed] = useState<FeedItem[]>([]);
 
-function AvatarStack({ uris }: { uris: string[] }) {
-  return (
-    <View style={styles.stack}>
-      {uris.slice(0, 3).map((u, i) => (
-        <Image
-          key={i}
-          source={{ uri: u }}
-          style={[
-            styles.avatar,
-            { marginLeft: i === 0 ? 0 : -10, borderColor: palette.screenBg },
-          ]}
-        />
-      ))}
-    </View>
-  );
-}
+  const load = useCallback(async () => {
+    // groups for filter
+    const gs = await offlineGroups.list();
+    setGroups(gs.map((g: any) => ({ id: g.id, name: g.name })));
 
-function RowCard({ item }: { item: ActivityItem }) {
-  return (
-    <View style={styles.card}>
-      {/* Top row */}
-      <View style={styles.rowTop}>
-        <View style={[styles.iconWrap, { backgroundColor: item.iconBg }]}>
-          {/* Little decorative icon – using a dollar glyph to stay dependency-free */}
-          <Text style={styles.iconGlyph}>$</Text>
-        </View>
+    // Build feed from local DB
+    // expenses
+    const exRows = await all<any>(`
+      SELECT e.id, e.groupId, e.description, e.amount, e.paidById, e.createdAt, g.name as groupName
+      FROM expenses e
+      JOIN groups g ON g.id = e.groupId
+      ORDER BY datetime(e.createdAt) DESC
+    `);
 
-        <View style={styles.titleWrap}>
-          <Text style={styles.title}>{item.title}</Text>
-          <Text style={styles.subtitle}>{item.subtitle}</Text>
-        </View>
+    // payments
+    const payRows = await all<any>(`
+      SELECT p.id, p.groupId, p.fromId, p.toId, p.amount, p.createdAt, g.name as groupName
+      FROM payments p
+      JOIN groups g ON g.id = p.groupId
+      ORDER BY datetime(p.createdAt) DESC
+    `);
 
-        <View style={styles.rightWrap}>
-          <StatusPill status={item.status} />
-          <Money status={item.status} amt={item.amount} big />
-        </View>
-      </View>
+    const mapExpense = (r: any): FeedItem => ({
+      id: r.id,
+      kind: 'expense',
+      groupId: r.groupId,
+      title: r.description,
+      subtitle: `${r.groupName} • Paid by ${String(r.paidById).slice(0, 6)}…`,
+      amount: r.amount, // display raw; per-user balance is on balances screen
+      createdAt: r.createdAt,
+      actors: { paidById: r.paidById },
+    });
 
-      {/* Accent divider */}
-      <View style={[styles.accentLine, { backgroundColor: item.accent }]} />
+    const mapPayment = (r: any): FeedItem => ({
+      id: r.id,
+      kind: 'payment',
+      groupId: r.groupId,
+      title: 'Payment',
+      subtitle: `${r.groupName} • ${String(r.fromId).slice(0, 6)}… → ${String(r.toId).slice(0, 6)}…`,
+      amount: r.amount,
+      createdAt: r.createdAt,
+      actors: { fromId: r.fromId, toId: r.toId },
+    });
 
-      {/* Bottom row */}
-      <View style={styles.rowBottom}>
-        <Text style={styles.time}>
-          {item.time} {new Date(item.dateISO).toLocaleDateString(undefined, {
-            month: 'long',
-            day: '2-digit',
-            year: 'numeric',
-          })}
-        </Text>
-        <AvatarStack uris={item.avatars} />
-      </View>
-    </View>
-  );
-}
-
-// ------------------------------------------------------------------
-
-export default function Activity() {
-  // group items by date (Today / Yesterday)
-  const sections = useMemo(() => {
-    const byDate: Record<string, ActivityItem[]> = {};
-    for (const it of DATA) {
-      if (!byDate[it.dateISO]) byDate[it.dateISO] = [];
-      byDate[it.dateISO].push(it);
-    }
-    const order = Object.keys(byDate).sort((a, b) => (a > b ? -1 : 1));
-    return order.map((d) => ({
-      key: d,
-      label:
-        d === TODAY
-          ? 'Today, 04/06/2024'
-          : d === YDAY
-          ? 'Yesterday, 05/06/2024'
-          : new Date(d).toDateString(),
-      items: byDate[d],
-    }));
+    const combined = [...exRows.map(mapExpense), ...payRows.map(mapPayment)];
+    combined.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    setFeed(combined);
   }, []);
 
-  return (
-    <SafeAreaView style={styles.safe}>
-      <StatusBar barStyle="light-content" />
-      <View style={styles.headerRow}>
-        <Text style={styles.headerTitle}>Activity</Text>
-        <TouchableOpacity activeOpacity={0.8}>
-          <View style={styles.searchDot} />
-        </TouchableOpacity>
-      </View>
+  useEffect(() => {
+    load();
+  }, [load]);
 
-      <FlatList
-        contentContainerStyle={styles.listPad}
-        data={sections}
-        keyExtractor={(s) => s.key}
-        renderItem={({ item: section }) => (
-          <View style={{ marginBottom: 24 }}>
-            <Text style={styles.sectionTitle}>{section.label}</Text>
-            {section.items.map((it) => (
-              <RowCard key={it.id} item={it} />
-            ))}
-            {/* thin divider between Today and Yesterday */}
-            <View style={styles.sectionDivider} />
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  }, [load]);
+
+  const filtered = useMemo(() => {
+    let list = feed;
+    if (groupId !== 'all') list = list.filter((x) => x.groupId === groupId);
+    if (type === 'expenses') list = list.filter((x) => x.kind === 'expense');
+    if (type === 'payments') list = list.filter((x) => x.kind === 'payment');
+    if (query.trim()) {
+      const q = query.toLowerCase();
+      list = list.filter(
+        (x) =>
+          x.title.toLowerCase().includes(q) ||
+          x.subtitle.toLowerCase().includes(q),
+      );
+    }
+    // group into sections
+    const bucketMap = new Map<string, FeedItem[]>();
+    for (const it of list) {
+      const k = dateBucket(it.createdAt);
+      if (!bucketMap.has(k)) bucketMap.set(k, []);
+      bucketMap.get(k)!.push(it);
+    }
+    return Array.from(bucketMap.entries())
+      .map(([title, data]) => ({ title, data }))
+      .sort((a, b) => {
+        // sort sections by most recent item inside
+        const at = new Date(a.data[0]?.createdAt || 0).getTime();
+        const bt = new Date(b.data[0]?.createdAt || 0).getTime();
+        return bt - at;
+      });
+  }, [feed, groupId, type, query]);
+
+  async function deleteExpense(id: string) {
+    await run('DELETE FROM expense_shares WHERE expenseId=?', [id]);
+    await run('DELETE FROM expenses WHERE id=?', [id]);
+    await onRefresh();
+  }
+  async function deletePayment(id: string) {
+    await run('DELETE FROM payments WHERE id=?', [id]);
+    await onRefresh();
+  }
+
+  const renderItem = ({ item }: { item: FeedItem }) => {
+    const isExpense = item.kind === 'expense';
+    return (
+      <View style={styles.row}>
+        <View style={styles.rowLeft}>
+          <View style={[styles.avatar, { backgroundColor: isExpense ? '#E8F9F2' : '#FFF5F3' }]}>
+            <Icon type={isExpense ? 'feather' : 'ion'} name={isExpense ? 'shopping-bag' : 'swap-horizontal'} size={16} color={isExpense ? COLORS.credit : COLORS.debit} />
           </View>
-        )}
-        showsVerticalScrollIndicator={false}
-      />
-    </SafeAreaView>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.title}>{item.title}</Text>
+            <Text style={styles.sub}>{item.subtitle}</Text>
+            <View style={styles.chips}>
+              <Chip text={isExpense ? 'Expense' : 'Payment'} tone={isExpense ? 'green' : 'red'} />
+              <Chip text={new Date(item.createdAt).toLocaleString()} />
+            </View>
+          </View>
+        </View>
+
+        <View style={{ alignItems: 'flex-end' }}>
+          <Text style={[styles.amount, { color: item.amount >= 0 ? COLORS.credit : COLORS.debit }]}>
+            {item.amount >= 0 ? '+' : '-'}${Math.abs(item.amount).toFixed(2)}
+          </Text>
+          <View style={{ height: 6 }} />
+          <View style={styles.rowActions}>
+            <TouchableOpacity onPress={() => (isExpense ? deleteExpense(item.id) : deletePayment(item.id))} style={styles.actionBtn}>
+              <Icon type="feather" name="trash-2" size={16} color={COLORS.debit} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  const renderSectionHeader = ({ section }: { section: Section }) => (
+    <View style={styles.sectionHeader}>
+      <Text style={styles.sectionHeaderText}>{section.title}</Text>
+    </View>
+  );
+
+  return (
+    <View style={styles.wrap}>
+      <Title>Activity</Title>
+      <View style={{ height: 10 }} />
+      <Card>
+        {/* search + filters */}
+        <View style={styles.filters}>
+          <View style={styles.searchBox}>
+            <Icon type="ion" name="search-outline" size={18} color={COLORS.sub} />
+            <Input
+              style={{ flex: 1 }}
+              placeholder="Search by title or group"
+              value={query}
+              onChangeText={setQuery}
+            />
+          </View>
+
+          <View style={styles.rowFilter}>
+            <Toggle active={type === 'all'} label="All" onPress={() => setType('all')} />
+            <Toggle active={type === 'expenses'} label="Expenses" onPress={() => setType('expenses')} />
+            <Toggle active={type === 'payments'} label="Payments" onPress={() => setType('payments')} />
+          </View>
+
+          {/* Group dropdown (simple pills) */}
+          <View style={styles.groupsWrap}>
+            <ScrollChips
+              items={[{ id: 'all', name: 'All groups' }, ...groups]}
+              value={groupId}
+              onChange={setGroupId}
+            />
+          </View>
+        </View>
+
+        <SectionList
+          sections={filtered as Section[]}
+          keyExtractor={(it) => it.id}
+          renderItem={renderItem}
+          renderSectionHeader={renderSectionHeader}
+          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          ListEmptyComponent={
+            <View style={{ paddingVertical: 24 }}>
+              <Text style={styles.sub}>No activity yet.</Text>
+            </View>
+          }
+        />
+      </Card>
+    </View>
   );
 }
 
-// ------------------------------------------------------------------
+/* ───────── mini components ───────── */
+
+function Chip({ text, tone }: { text: string; tone?: 'green' | 'red' }) {
+  const bg = tone === 'green' ? '#E8F9F2' : tone === 'red' ? '#FFF5F3' : COLORS.chip;
+  const fg = tone === 'green' ? COLORS.credit : tone === 'red' ? COLORS.debit : COLORS.sub;
+  return (
+    <View style={[styles.chip, { backgroundColor: bg, borderColor: fg }]}>
+      <Text style={[styles.chipText, { color: fg }]}>{text}</Text>
+    </View>
+  );
+}
+
+function Toggle({ label, active, onPress }: { label: string; active?: boolean; onPress?: () => void }) {
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.8} style={[styles.toggle, active && styles.toggleActive]}>
+      <Text style={[styles.toggleText, active && styles.toggleTextActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function ScrollChips({
+  items,
+  value,
+  onChange,
+}: {
+  items: { id: string; name: string }[];
+  value: string | 'all';
+  onChange: (v: any) => void;
+}) {
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {items.map((g) => {
+        const active = value === g.id;
+        return (
+          <TouchableOpacity
+            key={g.id}
+            onPress={() => onChange(g.id)}
+            style={[
+              styles.groupChip,
+              { backgroundColor: active ? theme.colors.brand : '#fff', borderColor: COLORS.line },
+            ]}
+          >
+            <Text style={{ color: active ? '#fff' : COLORS.txt, fontWeight: '700' }}>{g.name}</Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+}
+
+/* ───────── styles ───────── */
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: palette.screenBg,
-  },
-  headerRow: {
+  wrap: { flex: 1, backgroundColor: '#fff', padding: 16 },
+  filters: { gap: 12, marginBottom: 10 },
+  searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 6,
-    paddingBottom: 10,
-    justifyContent: 'space-between',
-  },
-  headerTitle: {
-    color: palette.text,
-    fontSize: 28,
-    fontWeight: '800',
-  },
-  searchDot: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: '#40484F',
-  },
-
-  listPad: {
-    paddingHorizontal: 16,
-    paddingBottom: 28,
-  },
-
-  sectionTitle: {
-    color: palette.text,
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 12,
-    opacity: 0.9,
-  },
-  sectionDivider: {
-    height: 1,
-    backgroundColor: palette.divider,
-    marginTop: 8,
-    marginHorizontal: 6,
-  },
-
-  card: {
-    backgroundColor: palette.card,
-    borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 10,
-    marginBottom: 14,
-    shadowColor: '#000',
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 6,
-  },
-
-  rowTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  iconWrap: {
-    width: 46,
-    height: 46,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: theme.colors.line,
     borderRadius: 12,
+    paddingHorizontal: 10,
+    height: 44,
+  },
+  rowFilter: { flexDirection: 'row', gap: 8 },
+  toggle: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: theme.colors.line,
+  },
+  toggleActive: { backgroundColor: theme.colors.brand, borderColor: theme.colors.brand },
+  toggleText: { color: theme.colors.text, fontWeight: '600' },
+  toggleTextActive: { color: '#fff' },
+
+  groupsWrap: { marginTop: 2 },
+
+  sectionHeader: {
+    paddingTop: 12,
+    paddingBottom: 6,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.line,
+  },
+  sectionHeaderText: { color: theme.colors.subtext, fontWeight: '700' },
+
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderTopColor: theme.colors.line,
+    borderTopWidth: 1,
+  },
+  rowLeft: { flexDirection: 'row', gap: 12, flex: 1 },
+  avatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.line,
   },
-  iconGlyph: {
-    fontSize: 24,
-    color: '#1E2A2A',
-    fontWeight: '900',
-  },
-  titleWrap: {
-    flex: 1,
-  },
-  title: {
-    color: palette.text,
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  subtitle: {
-    color: palette.textDim,
-    marginTop: 2,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  rightWrap: {
-    alignItems: 'flex-end',
-  },
-  pill: {
+  title: { color: theme.colors.text, fontWeight: '700' },
+  sub: { color: theme.colors.subtext, marginTop: 2 },
+  chips: { flexDirection: 'row', gap: 6, marginTop: 6, flexWrap: 'wrap' },
+  chip: {
+    paddingVertical: 4,
     paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  chipText: { fontWeight: '700', fontSize: 12 },
+  amount: { color: theme.colors.text, fontWeight: '800' },
+  rowActions: { flexDirection: 'row', gap: 8 },
+  actionBtn: {
     paddingVertical: 6,
-    borderRadius: 20,
-    marginBottom: 8,
-  },
-  pillText: {
-    fontWeight: '800',
-    letterSpacing: 0.2,
-  },
-  money: {
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  moneyBig: {
-    fontSize: 20,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: theme.colors.line,
+    backgroundColor: '#fff',
   },
 
-  accentLine: {
-    height: 2,
-    borderRadius: 2,
-    marginTop: 10,
-    marginBottom: 10,
-    opacity: 0.9,
-  },
-
-  rowBottom: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  time: {
-    color: palette.textDim,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-
-  stack: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  avatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    borderWidth: 2,
+  // 🔥 missing before — now added
+  groupChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    borderWidth: 1,
   },
 });

@@ -1,3 +1,4 @@
+import { initOffline } from './services/offline';
 import React, { useEffect } from 'react';
 import {
   View,
@@ -167,6 +168,7 @@ function Tabs() {
 export default function App() {
   const [initialRoute, setInitialRoute] = React.useState<'Auth' | 'Main'>('Auth');
   useEffect(() => {
+    initOffline();
     setInitialRoute(getToken() ? 'Main' : 'Auth');
   }, []);
 

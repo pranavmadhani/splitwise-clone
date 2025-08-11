@@ -1,42 +1,41 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  LayoutAnimation,
-  Platform,
-} from 'react-native';
-import { api } from '../services/api';
-
-/**
- * Pixel-focused dark “Group” screen
- * – Summary card with owed/owe, progress bar, small avatars, CTA row
- * – Month sections with expense rows (icon + title + who-paid + chip + date + amount)
- * – Settle suggestions button scrolls to bottom section
- *
- * NOTE: This is *UI-only*. All network calls reuse your existing endpoints.
- * It will render even if backend is offline (empty lists).
- */
+import React, { useEffect, useMemo, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, Alert, TouchableOpacity } from 'react-native';
+import { Title, Subtitle, Card, Input, Button } from '../ui';
+import { theme } from '../theme';
+import { offlineExpenses, offlineGroups, offlineAuth } from '../services/offline';
 
 type SplitType = 'equal' | 'exact' | 'percentage' | 'shares';
 
-const C = {
-  bg: '#0e1113',
-  surface: '#1a1f23',
-  surface2: '#232a2f',
-  line: '#2d363c',
-  text: '#eff3f6',
-  sub: '#9aa6af',
-  mint: '#16c79a',       // + Lent / you’re owed
-  orange: '#ff8a3d',    // - Borrowed / you owe
-  good: '#27ae60',
-  bad: '#e54f4f',
-  chipBg: '#0f1417',
-};
+// local colors (avoid relying on theme.green/red that may not exist)
+const GREEN = '#27ae60';
+const RED = '#e54f4f';
+const LINE = theme.colors.line;
+const TXT = theme.colors.text;
+const SUB = theme.colors.subtext;
 
-const ICONS = ['🧾','🍔','✈️','🚖','🏨','🎟️','🛒','☕️','🍻'];
+// lightweight pill (self-contained; no prop mismatch)
+function TinyPill({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active?: boolean;
+  onPress?: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.8}
+      style={[
+        styles.pill,
+        { borderColor: LINE, backgroundColor: active ? theme.colors.brand : '#fff' },
+      ]}
+    >
+      <Text style={[styles.pillText, { color: active ? '#fff' : TXT }]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
 
 export default function Group({ route }: any) {
   const id = route.params.id as string;
@@ -45,365 +44,237 @@ export default function Group({ route }: any) {
   const [expenses, setExpenses] = useState<any[]>([]);
   const [balances, setBalances] = useState<Record<string, number>>({});
   const [usersById, setUsersById] = useState<Record<string, any>>({});
-  const [loading, setLoading] = useState(false);
+  const [me, setMe] = useState<any>(null);
 
-  const settleRef = useRef<View>(null);
+  // form
+  const [desc, setDesc] = useState('');
+  const [amount, setAmount] = useState('0');
+  const [paidById, setPaidById] = useState('');
+  const [splitType, setSplitType] = useState<SplitType>('equal');
+  const [parts, setParts] = useState<Record<string, number>>({});
+  const [memberId, setMemberId] = useState('');
 
   async function load() {
-    setLoading(true);
-    try {
-      const gs = await api.get('/groups').catch(() => ({ data: [] }));
-      const g = (gs.data || []).find((x: any) => x.id === id);
-      setGroup(g || { name: 'Group', members: [], currency: 'USD' });
-
-      const ms = g?.members?.map((m: any) => m.user) || [];
-      setMembers(ms);
-      const by: any = {};
-      for (const m of ms) by[m.id] = m;
-      setUsersById(by);
-
-      const ex = await api.get(`/expenses/group/${id}`).catch(() => ({ data: [] }));
-      setExpenses(ex.data || []);
-
-      const bal = await api.get(`/balances/group/${id}`).catch(() => ({ data: {} }));
-      setBalances(bal.data || {});
-    } finally {
-      setLoading(false);
+    const g = await offlineGroups.members(id);
+    if (!g) {
+      Alert.alert('Group missing');
+      return;
     }
+    setGroup(g);
+
+    const ms = g.members?.map((m: any) => m.user) || [];
+    setMembers(ms);
+    const uby: any = {};
+    for (const m of ms) uby[m.id] = m;
+    setUsersById(uby);
+
+    const ex = await offlineExpenses.listByGroup(id);
+    setExpenses(ex);
+
+    const bal = await offlineExpenses.balances(id);
+    setBalances(bal);
+
+    const init: any = {};
+    for (const m of ms) init[m.id] = 0;
+    setParts(init);
+
+    const current = await offlineAuth.me();
+    setMe(current);
   }
   useEffect(() => {
     load();
   }, [id]);
 
-  // derive totals: positive = others owe you; negative = you owe others
-  const totals = useMemo(() => {
-    const vals = Object.values(balances).map(Number);
-    const plus = vals.filter((v) => v > 0).reduce((s, v) => s + v, 0);
-    const minus = Math.abs(vals.filter((v) => v < 0).reduce((s, v) => s + v, 0));
-    const denom = Math.max(1, plus + minus);
-    return { plus, minus, pct: Math.min(1, plus / denom) };
-  }, [balances]);
+  const total = useMemo(() => expenses.reduce((s, e) => s + Number(e.amount), 0), [expenses]);
 
-  // group expenses by month label
-  const byMonth = useMemo(() => {
-    const fmt = (d: string | Date) => {
-      const dt = d ? new Date(d) : new Date();
-      const month = dt.toLocaleString('en-US', { month: 'long' });
-      return `${month}, ${dt.getFullYear()}`;
-    };
-    const m: Record<string, any[]> = {};
-    for (const e of expenses) {
-      const key = fmt(e.createdAt || e.updatedAt || new Date());
-      m[key] = m[key] || [];
-      m[key].push(e);
+  function upd(uid: string, v: number) {
+    setParts((p) => ({ ...p, [uid]: isNaN(v) ? 0 : v }));
+  }
+
+  async function addExpense() {
+    if (!desc.trim()) return Alert.alert('Description required');
+    if (!paidById.trim()) return Alert.alert('Enter a valid payer userId');
+    try {
+      await offlineExpenses.add({
+        groupId: id,
+        description: desc,
+        amount: Number(amount),
+        paidById,
+        split: { splitType, parts: Object.entries(parts).map(([userId, value]) => ({ userId, value })) },
+      });
+      setDesc('');
+      setAmount('0');
+      setPaidById('');
+      await load();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to add expense');
     }
-    // sort sections newest first; each list newest first
-    const entries = Object.entries(m).sort(
-      (a, b) => new Date((b[1][0]?.createdAt)||Date.now()).getTime() - new Date((a[1][0]?.createdAt)||Date.now()).getTime()
-    );
-    return entries.map(([k, arr]) => [k, arr.sort(
-      (a, b) => new Date(b.createdAt || Date.now()).getTime() - new Date(a.createdAt || Date.now()).getTime()
-    )] as [string, any[]]);
-  }, [expenses]);
-
-  function nameOf(uid?: string) {
-    const u = uid ? usersById[uid] : undefined;
-    return u?.name || u?.email || 'Someone';
   }
 
-  function Chip({ kind }: { kind: 'lent' | 'borrowed' }) {
-    const text = kind === 'lent' ? '• Lent' : '• Borrowed';
-    const bg = kind === 'lent' ? '#143c34' : '#3a2419';
-    const fg = kind === 'lent' ? C.mint : C.orange;
-    return (
-      <View style={[styles.chip, { backgroundColor: bg, borderColor: fg }]}>
-        <Text style={[styles.chipText, { color: fg }]}>{text}</Text>
-      </View>
-    );
+  async function addMember() {
+    if (!memberId.trim()) return;
+    await offlineGroups.addMember(id, memberId.trim());
+    setMemberId('');
+    await load();
   }
 
-  function Row({ e, idx }: { e: any; idx: number }) {
-    // crude icon pick by index / description
-    const icon = ICONS[idx % ICONS.length];
-    const who = nameOf(e.paidById);
-    const youPaid = false; // could compare with /users/me when available
-    const positive = Number(e.amount) >= 0;
-
-    return (
-      <View style={styles.row}>
-        <View style={styles.rowLeft}>
-          <View style={styles.rowIcon}>
-            <Text style={{ fontSize: 16 }}>{icon}</Text>
-          </View>
-          <View>
-            <Text style={styles.rowTitle} numberOfLines={1}>
-              {e.description || 'Expense'}
-            </Text>
-            <Text style={styles.rowSub} numberOfLines={1}>
-              {who} paid ${Number(e.amount || 0).toFixed(2)}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.rowRight}>
-          <Chip kind={positive ? 'lent' : 'borrowed'} />
-          <Text style={[styles.rowAmt, { color: positive ? C.mint : C.orange }]}>
-            {positive ? '+' : '-'}${Math.abs(Number(e.amount || 0)).toFixed(2)}
-          </Text>
-        </View>
-      </View>
-    );
-  }
-
-  function scrollToSettle() {
-    if (!settleRef.current) return;
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    // @ts-ignore
-    settleRef.current.measure?.((x: number, y: number, w: number, h: number, px: number, py: number) => {
-      // very simple: rely on ScrollView automatic; this is only a hint UX-wise
-    });
+  async function pay(t: any) {
+    if (!me?.id) return Alert.alert('Need a signed-in user to mark paid');
+    await offlineExpenses.markPaid(id, t.toId, t.amount, me.id);
+    await load();
   }
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentContainerStyle={{ padding: 16 }}>
-      {/* Header label mirrors reference */}
-      <Text style={styles.header}>Group</Text>
-
-      {/* Summary card */}
-      <View style={styles.card}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-          <View style={styles.thumb} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.kpiLabel}>Total Owed</Text>
-            <Text style={[styles.kpiValue, { color: C.mint }]}>+${totals.plus.toFixed(2)}</Text>
-          </View>
-          <View style={{ flex: 1, alignItems: 'flex-end' }}>
-            <Text style={styles.kpiLabel}>Total Owe</Text>
-            <Text style={[styles.kpiValue, { color: C.orange }]}>-${totals.minus.toFixed(2)}</Text>
-          </View>
-        </View>
-
-        {/* progress */}
-        <View style={styles.progressWrap}>
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${Math.round(totals.pct * 100)}%` }]} />
-          </View>
-        </View>
-
-        <Text style={styles.groupName} numberOfLines={1}>
-          {group?.name || 'Winter sem Trio'}
-        </Text>
-
-        {/* micro “people owe” line (static text shape, data-aware) */}
-        <Text style={styles.miniLine} numberOfLines={2}>
-          {Object.entries(balances).length
-            ? (() => {
-                const pos = Object.entries(balances).filter(([, v]) => Number(v) > 0);
-                const neg = Object.entries(balances).filter(([, v]) => Number(v) < 0);
-                const firstPos = pos[0]?.[0];
-                const firstNeg = neg[0]?.[0];
-                const a = firstPos ? `${nameOf(firstPos)} owes you $${Number(balances[firstPos]).toFixed(2)}` : '';
-                const b = firstNeg ? `you owe ${nameOf(firstNeg)} $${Math.abs(Number(balances[firstNeg])).toFixed(2)}` : '';
-                return [a, b].filter(Boolean).join(' · ');
-              })()
-            : 'Nobody owes anyone yet'}
-        </Text>
-
-        {/* CTA row */}
-        <View style={styles.ctaRow}>
-          <CTA title="Settle Up" onPress={scrollToSettle} />
-          <CTA title="View Details" onPress={() => {}} outline />
-          <CTA title="Balance" onPress={() => {}} outline />
-        </View>
+    <ScrollView style={{ flex: 1, backgroundColor: '#fff' }} contentContainerStyle={{ padding: 16, gap: 12 }}>
+      <View>
+        <Title>{group?.name || 'Group'}</Title>
+        <Subtitle>Total spent: ${total.toFixed(2)}</Subtitle>
       </View>
 
-      {/* Month sections */}
-      {byMonth.map(([label, list], i) => (
-        <View key={label} style={{ marginTop: i === 0 ? 16 : 22 }}>
-          <Text style={styles.sectionTitle}>{label}</Text>
-          <View style={styles.sectionCard}>
-            {list.map((e, idx) => (
-              <Row key={e.id || idx} e={e} idx={idx} />
+      <Card>
+        <Text style={styles.h}>Add expense</Text>
+        <Input label="Description" value={desc} onChangeText={setDesc} />
+        <Input label="Amount" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
+        <Input label="Paid by (userId)" value={paidById} onChangeText={setPaidById} />
+        <View style={styles.pills}>
+          {(['equal', 'exact', 'percentage', 'shares'] as SplitType[]).map((t) => (
+            <TinyPill key={t} label={t} active={splitType === t} onPress={() => setSplitType(t)} />
+          ))}
+        </View>
+        {['exact', 'percentage', 'shares'].includes(splitType) && (
+          <View style={{ marginVertical: 8 }}>
+            {members.map((m) => (
+              <View key={m.id} style={styles.row}>
+                <Text style={styles.name}>{m.name || m.email}</Text>
+                <Input
+                  style={{ width: 120, textAlign: 'right' }}
+                  value={String(parts[m.id] || 0)}
+                  onChangeText={(v) => upd(m.id, parseFloat(v))}
+                  keyboardType="decimal-pad"
+                />
+              </View>
             ))}
-            {list.length === 0 && <Text style={styles.empty}>No expenses yet.</Text>}
+            <Text style={styles.hint}>
+              {splitType === 'exact' && 'Exact amounts must sum to total.'}
+              {splitType === 'percentage' && ' Percentages must sum to 100.'}
+              {splitType === 'shares' && ' Shares are proportional weights.'}
+            </Text>
           </View>
-        </View>
-      ))}
+        )}
+        <Button title="Save expense" onPress={addExpense} />
+      </Card>
 
-      {/* Settlement suggestions anchor */}
-      <View ref={settleRef} style={{ marginTop: 24 }}>
-        <Text style={styles.sectionTitle}>Settlement suggestions</Text>
-        <View style={styles.sectionCard}>
-          <SettlementBlock groupId={id} usersById={usersById} />
-        </View>
-      </View>
+      <Card>
+        <Text style={styles.h}>Expenses</Text>
+        {expenses.map((e) => (
+          <View key={e.id} style={styles.row}>
+            <View>
+              <Text style={styles.name}>{e.description}</Text>
+              <Text style={styles.muted}>
+                Paid by {usersById[e.paidById]?.name || usersById[e.paidById]?.email || e.paidById}
+              </Text>
+            </View>
+            <Text style={styles.amount}>${Number(e.amount).toFixed(2)}</Text>
+          </View>
+        ))}
+        {expenses.length === 0 && <Text style={styles.muted}>No expenses yet.</Text>}
+      </Card>
 
-      <View style={{ height: 40 }} />
+      <Card>
+        <Text style={styles.h}>Members</Text>
+        {members.map((m) => (
+          <View key={m.id} style={styles.row}>
+            <Text style={styles.name}>{m.name || m.email}</Text>
+            <Text style={styles.muted}>{m.id.slice(0, 8)}…</Text>
+          </View>
+        ))}
+        <Input label="Add member by userId" value={memberId} onChangeText={setMemberId} />
+        <Button title="Add member" onPress={addMember} kind="ghost" />
+      </Card>
+
+      <Card>
+        <Text style={styles.h}>Balances</Text>
+        {Object.entries(balances).map(([uid, v]) => (
+          <View key={uid} style={styles.row}>
+            <Text style={styles.name}>{usersById[uid]?.name || usersById[uid]?.email || uid.slice(0, 6)}</Text>
+            <Text style={{ color: Number(v) >= 0 ? GREEN : RED }}>
+              {Number(v) >= 0 ? '+' : '-'}${Math.abs(Number(v)).toFixed(2)}
+            </Text>
+          </View>
+        ))}
+        {Object.keys(balances).length === 0 && <Text style={styles.muted}>No balances yet.</Text>}
+      </Card>
+
+      <Card>
+        <Text style={styles.h}>Settlement suggestions</Text>
+        <Settlements id={id} usersById={usersById} onPay={pay} />
+      </Card>
+
+      <View style={{ height: 24 }} />
     </ScrollView>
   );
 }
 
-function CTA({ title, onPress, outline }: { title: string; onPress: () => void; outline?: boolean }) {
-  return (
-    <TouchableOpacity
-      onPress={onPress}
-      style={[
-        styles.cta,
-        outline
-          ? { backgroundColor: 'transparent', borderColor: C.orange, borderWidth: 1 }
-          : { backgroundColor: C.orange },
-      ]}
-    >
-      <Text style={[styles.ctaText, outline && { color: C.orange }]}>{title}</Text>
-    </TouchableOpacity>
-  );
-}
-
-function SettlementBlock({
-  groupId,
+function Settlements({
+  id,
   usersById,
+  onPay,
 }: {
-  groupId: string;
+  id: string;
   usersById: Record<string, any>;
+  onPay: (t: any) => void;
 }) {
   const [list, setList] = useState<any[]>([]);
   useEffect(() => {
-    api.get(`/settlements/group/${groupId}/suggest`).then((r) => setList(r.data || []));
-  }, [groupId]);
+    offlineExpenses.suggest(id).then(setList);
+  }, [id]);
 
-  if (!list.length) return <Text style={styles.empty}>No settlements needed.</Text>;
+  if (list.length === 0) return <Text style={styles.muted}>No settlements needed.</Text>;
 
   return (
     <View style={{ gap: 10 }}>
       {list.map((t, i) => (
-        <View key={i} style={styles.settleRow}>
-          <Text style={styles.settleText}>
-            <Text style={{ color: C.bad }}>
-              {usersById[t.fromId]?.name || usersById[t.fromId]?.email || 'User'}
+        <View key={i} style={styles.row}>
+          <Text style={styles.name}>
+            <Text style={{ color: RED }}>
+              {usersById[t.fromId]?.name || usersById[t.fromId]?.email || t.fromId.slice(0, 6)}
             </Text>{' '}
-            pays{' '}
-            <Text style={{ color: C.text, fontWeight: '700' }}>
-              ${Number(t.amount).toFixed(2)}
-            </Text>{' '}
-            to{' '}
-            <Text style={{ color: C.good }}>
-              {usersById[t.toId]?.name || usersById[t.toId]?.email || 'User'}
+            pays
+            <Text style={{ color: TXT, fontWeight: '700' }}> ${Number(t.amount).toFixed(2)}</Text> to
+            <Text style={{ color: GREEN }}>
+              {' '}
+              {usersById[t.toId]?.name || usersById[t.toId]?.email || t.toId.slice(0, 6)}
             </Text>
           </Text>
-          <TouchableOpacity
-            onPress={() => api.post(`/settlements/group/${groupId}/pay`, { toId: t.toId, amount: t.amount }).then(()=>{})}
-            style={styles.settleBtn}
-          >
-            <Text style={styles.settleBtnText}>Mark paid</Text>
-          </TouchableOpacity>
+          <Button title="Mark paid" onPress={() => onPay(t)} kind="ghost" />
         </View>
       ))}
     </View>
   );
 }
 
-/* ------------------------------- styles ---------------------------------- */
-
 const styles = StyleSheet.create({
-  header: { color: C.text, fontSize: 18, fontWeight: '700', marginBottom: 10 },
-  card: {
-    backgroundColor: C.surface,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: C.line,
-    padding: 14,
-  },
-  thumb: {
-    width: 56,
-    height: 56,
-    borderRadius: 12,
-    backgroundColor: C.surface2,
-    borderWidth: 1,
-    borderColor: C.line,
-  },
-  kpiLabel: { color: C.sub, fontSize: 12 },
-  kpiValue: { fontSize: 16, fontWeight: '700' },
-  progressWrap: { marginTop: 10, marginBottom: 8 },
-  progressTrack: {
-    height: 10,
-    backgroundColor: '#0c0f11',
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: C.line,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: C.mint,
-    borderRightWidth: 8,
-    borderRightColor: '#0aa582',
-  },
-  groupName: { color: C.text, fontWeight: '700', marginTop: 8 },
-  miniLine: { color: C.sub, marginTop: 4 },
-  ctaRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
-  cta: { paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12 },
-  ctaText: { color: '#111', fontWeight: '700' },
-
-  sectionTitle: { color: C.sub, fontWeight: '700', marginBottom: 8, marginLeft: 2 },
-  sectionCard: {
-    backgroundColor: C.surface,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: C.line,
-    padding: 10,
-  },
-
+  h: { fontWeight: '700', marginBottom: 8, color: TXT },
   row: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: C.line,
-  },
-  rowLeft: { flexDirection: 'row', gap: 12, alignItems: 'center', flex: 1 },
-  rowIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 999,
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: C.surface2,
-    borderWidth: 1,
-    borderColor: C.line,
-  },
-  rowTitle: { color: C.text, fontWeight: '600', maxWidth: 170 },
-  rowSub: { color: C.sub, fontSize: 12 },
-  rowRight: { alignItems: 'flex-end' },
-  chip: {
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    marginBottom: 6,
-    alignSelf: 'flex-end',
-  },
-  chipText: { fontWeight: '700', fontSize: 12 },
-  rowAmt: { fontWeight: '700', fontSize: 16 },
-
-  empty: { color: C.sub, paddingVertical: 10 },
-
-  settleRow: {
     paddingVertical: 10,
+    borderTopColor: LINE,
     borderTopWidth: 1,
-    borderTopColor: C.line,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
   },
-  settleText: { color: C.text },
-  settleBtn: {
-    backgroundColor: C.surface2,
-    borderWidth: 1,
-    borderColor: C.line,
-    paddingVertical: 8,
+  name: { color: TXT },
+  muted: { color: SUB },
+  amount: { color: TXT, fontWeight: '700' },
+  pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 6 },
+  pill: {
+    paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    marginRight: 8,
+    marginBottom: 8,
   },
-  settleBtnText: { color: C.text, fontWeight: '700' },
+  pillText: { fontWeight: '700' },
+  hint: { color: SUB, fontSize: 12 },
 });
